@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./tradeos-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./tradeos-backend/.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./tradeos-backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build: ./tradeos-frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./tradeos-frontend/.env.local
+    depends_on:
+      - backend
+    volumes:
+      - ./tradeos-frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tradeos
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
