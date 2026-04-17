@@ -13,19 +13,28 @@ class AuthStatusResponse(BaseModel):
 
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status():
-    """Returns current Kotak Neo session status."""
-    is_auth = kotak_auth._auth_date is not None
     return AuthStatusResponse(
-        authenticated=is_auth,
-        auth_date=str(kotak_auth._auth_date) if is_auth else None,
+        authenticated=kotak_auth.is_authenticated,
+        auth_date=str(kotak_auth._auth_date) if kotak_auth.is_authenticated else None,
     )
 
 
 @router.post("/login")
 async def trigger_login():
-    """Manually trigger Kotak Neo authentication (useful for dev/test)."""
+    """Manually trigger Kotak Neo v2 authentication."""
     try:
         await kotak_auth.get_client()
-        return {"message": "Authentication successful", "auth_date": str(kotak_auth._auth_date)}
+        return {
+            "message": "Authentication successful",
+            "auth_date": str(kotak_auth._auth_date),
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/logout")
+async def logout():
+    await kotak_auth.close()
+    return {"message": "Logged out"}

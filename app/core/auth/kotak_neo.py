@@ -1,8 +1,16 @@
-"""Kotak Neo API authentication and session management."""
+"""Kotak Neo API v2 authentication and session management.
+
+Auth flow (two steps, both synchronous under the hood):
+  1. totp_login(mobile_number, ucc, totp)  → view token + session id
+  2. totp_validate(mpin)                   → trade token (required for orders)
+
+The client is re-authenticated once per calendar day and cached as a
+module-level singleton via `kotak_auth.get_client()`.
+"""
 import pyotp
 import asyncio
 from typing import Optional
-from datetime import datetime, date
+from datetime import date
 
 from neo_api_client import NeoAPI
 
@@ -10,54 +18,44 @@ from app.core.config import settings
 
 
 class KotakNeoAuth:
-    """
-    Manages a single authenticated Kotak Neo session.
-    Re-authenticates automatically when the session expires (daily).
-    """
-
     def __init__(self):
         self._client: Optional[NeoAPI] = None
         self._auth_date: Optional[date] = None
         self._lock = asyncio.Lock()
 
-    def _generate_totp(self) -> str:
-        totp = pyotp.TOTP(settings.kotak_neo_totp_secret)
-        return totp.now()
+    def _make_totp(self) -> str:
+        return pyotp.TOTP(settings.kotak_neo_totp_secret).now()
 
     async def _authenticate(self) -> NeoAPI:
-        """Perform full login flow: login → OTP (TOTP) → session."""
         client = NeoAPI(
+            environment="prod",
+            access_token=None,
+            neo_fin_key=None,
             consumer_key=settings.kotak_neo_consumer_key,
-            consumer_secret=settings.kotak_neo_consumer_secret,
-            environment="prod",  # use "uat" for testing
-            on_message=None,
-            on_error=None,
-            on_close=None,
-            on_open=None,
         )
 
-        # Step 1: initiate login with mobile + password
+        # Step 1: TOTP login — generates view token + session id
         login_resp = await asyncio.to_thread(
-            client.login,
-            mobilenumber=settings.kotak_neo_mobile_number,
-            password=settings.kotak_neo_password,
+            client.totp_login,
+            mobile_number=settings.kotak_neo_mobile_number,
+            ucc=settings.kotak_neo_ucc,
+            totp=self._make_totp(),
         )
         if not login_resp or login_resp.get("data") is None:
-            raise RuntimeError(f"Kotak Neo login failed: {login_resp}")
+            raise RuntimeError(f"totp_login failed: {login_resp}")
 
-        # Step 2: complete OTP (TOTP-based 2FA)
-        totp_code = self._generate_totp()
-        otp_resp = await asyncio.to_thread(
-            client.session_2fa,
-            OTP=totp_code,
+        # Step 2: TOTP validate — generates trade token
+        validate_resp = await asyncio.to_thread(
+            client.totp_validate,
+            mpin=settings.kotak_neo_mpin,
         )
-        if not otp_resp or otp_resp.get("data") is None:
-            raise RuntimeError(f"Kotak Neo 2FA failed: {otp_resp}")
+        if not validate_resp or validate_resp.get("data") is None:
+            raise RuntimeError(f"totp_validate failed: {validate_resp}")
 
         return client
 
     async def get_client(self) -> NeoAPI:
-        """Return a valid, authenticated NeoAPI client, re-authing if needed."""
+        """Return a valid authenticated NeoAPI client, re-authing once per day."""
         async with self._lock:
             today = date.today()
             if self._client is None or self._auth_date != today:
@@ -66,9 +64,17 @@ class KotakNeoAuth:
         return self._client
 
     async def close(self):
+        if self._client:
+            try:
+                await asyncio.to_thread(self._client.logout)
+            except Exception:
+                pass
         self._client = None
         self._auth_date = None
 
+    @property
+    def is_authenticated(self) -> bool:
+        return self._client is not None and self._auth_date == date.today()
 
-# Module-level singleton
+
 kotak_auth = KotakNeoAuth()
