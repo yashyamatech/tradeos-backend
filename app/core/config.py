@@ -1,10 +1,9 @@
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 class Settings(BaseSettings):
     app_env: str = "development"
-    allowed_origins: List[str] = ["http://localhost:3000"]
+    allowed_origins: str = "*"
 
     # Kotak Neo
     kotak_neo_consumer_key: str = ""
@@ -16,6 +15,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+
+    def get_origins(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",")]
 
 
 settings = Settings()

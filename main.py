@@ -8,23 +8,17 @@ from app.api.routes import auth, market, trades
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialise Kotak Neo session if credentials present
     from app.services.kotak_service import kotak_service
     await kotak_service.init()
     yield
-    # Shutdown: clean up websocket connections
     await kotak_service.close()
 
 
-app = FastAPI(
-    title="TradeOS API",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="TradeOS API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
+    allow_origins=settings.get_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
