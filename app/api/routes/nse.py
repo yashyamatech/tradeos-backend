@@ -1,6 +1,7 @@
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from urllib.parse import quote
+from typing import Literal
 
 router = APIRouter()
 
@@ -12,55 +13,85 @@ NSE_HEADERS = {
     "Connection": "keep-alive",
 }
 
-SECTORS = {
-    "NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY PHARMA",
-    "NIFTY AUTO", "NIFTY FMCG", "NIFTY METAL", "NIFTY REALTY",
-    "NIFTY MEDIA", "NIFTY ENERGY", "NIFTY FINANCIAL SERVICES",
-    "NIFTY MIDCAP 100", "NIFTY SMALLCAP 100", "NIFTY INFRA",
-    "NIFTY COMMODITIES", "NIFTY CONSUMPTION",
+HEATMAP_TYPES = {
+    "sectoral":    "Sectoral Indices",
+    "broad":       "Broad Market Indices",
+    "thematic":    "Thematic Indices",
+    "strategy":    "Strategy Indices",
 }
 
 
-async def _nse_session() -> httpx.AsyncClient:
-    """Return an httpx client with a live NSE session cookie."""
+async def _nse_client() -> httpx.AsyncClient:
+    """Open an httpx client and establish a valid NSE session cookie."""
     client = httpx.AsyncClient(timeout=20, follow_redirects=True)
     await client.get("https://www.nseindia.com", headers=NSE_HEADERS)
     return client
 
 
 @router.get("/heatmap")
-async def sector_heatmap():
+async def sector_heatmap(
+    type: str = Query(default="sectoral", description="sectoral | broad | thematic | strategy")
+):
+    """
+    Uses NSE's dedicated heatmap API.
+    Source: https://www.nseindia.com/api/heatmap-index?type=Sectoral%20Indices
+    """
+    index_type = HEATMAP_TYPES.get(type.lower(), "Sectoral Indices")
+    url = f"https://www.nseindia.com/api/heatmap-index?type={quote(index_type)}"
+
     try:
-        async with await _nse_session() as client:
-            r = await client.get(
-                "https://www.nseindia.com/api/allIndices",
-                headers=NSE_HEADERS,
-            )
+        async with await _nse_client() as client:
+            r = await client.get(url, headers=NSE_HEADERS)
             r.raise_for_status()
             data = r.json()
 
+        # Response is a list of index objects
+        raw = data if isinstance(data, list) else data.get("data", [])
+
         sectors = [
             {
-                "name": idx["index"],
-                "last": idx.get("last"),
-                "change": idx.get("variation"),
-                "pctChange": idx.get("percentChange"),
-                "open": idx.get("open"),
-                "high": idx.get("high"),
-                "low": idx.get("low"),
-                "yearHigh": idx.get("yearHigh"),
-                "yearLow": idx.get("yearLow"),
-                "advances": idx.get("advances", 0),
-                "declines": idx.get("declines", 0),
-                "unchanged": idx.get("unchanged", 0),
+                "name":       idx.get("indexSymbol") or idx.get("index") or idx.get("name"),
+                "last":       idx.get("last") or idx.get("indexValue") or idx.get("lastPrice"),
+                "change":     idx.get("variation") or idx.get("change"),
+                "pctChange":  idx.get("percentChange") or idx.get("pChange") or idx.get("pct_change"),
+                "open":       idx.get("open"),
+                "high":       idx.get("high"),
+                "low":        idx.get("low"),
+                "yearHigh":   idx.get("yearHigh") or idx.get("52WH"),
+                "yearLow":    idx.get("yearLow") or idx.get("52WL"),
+                "advances":   idx.get("advances", 0),
+                "declines":   idx.get("declines", 0),
+                "unchanged":  idx.get("unchanged", 0),
             }
-            for idx in data.get("data", [])
-            if idx.get("index") in SECTORS
+            for idx in raw
+            if idx.get("indexSymbol") or idx.get("index") or idx.get("name")
         ]
-        return {"sectors": sectors, "timestamp": data.get("timestamp")}
+
+        return {
+            "sectors": sectors,
+            "type": index_type,
+            "count": len(sectors),
+            "source": url,
+        }
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"NSE returned {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/heatmap/raw")
+async def heatmap_raw(
+    type: str = Query(default="sectoral")
+):
+    """Raw NSE heatmap response — use this to inspect exact field names."""
+    index_type = HEATMAP_TYPES.get(type.lower(), "Sectoral Indices")
+    url = f"https://www.nseindia.com/api/heatmap-index?type={quote(index_type)}"
+    try:
+        async with await _nse_client() as client:
+            r = await client.get(url, headers=NSE_HEADERS)
+            r.raise_for_status()
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -68,19 +99,17 @@ async def sector_heatmap():
 @router.get("/sector/{index_name}")
 async def sector_stocks(index_name: str):
     """
-    Returns all constituent stocks for the given index with
-    open, high, low, previousClose, ltp, volume, change, pctChange.
+    Constituent stocks for a given index with OHLCV + LTP.
     e.g. /api/nse/sector/NIFTY%20BANK
     """
+    url = f"https://www.nseindia.com/api/equity-stockIndices?index={quote(index_name.upper())}"
     try:
-        url = f"https://www.nseindia.com/api/equity-stockIndices?index={quote(index_name.upper())}"
-        async with await _nse_session() as client:
+        async with await _nse_client() as client:
             r = await client.get(url, headers=NSE_HEADERS)
             r.raise_for_status()
             data = r.json()
 
         raw = data.get("data", [])
-        # First item is always the index summary itself — skip it
         stocks = [
             {
                 "symbol":        s.get("symbol"),
@@ -95,7 +124,7 @@ async def sector_stocks(index_name: str):
                 "yearHigh":      s.get("52WH"),
                 "yearLow":       s.get("52WL"),
             }
-            for s in raw[1:]  # skip index row
+            for s in raw[1:]  # first row is the index itself
         ]
         return {
             "index": index_name.upper(),
@@ -106,16 +135,5 @@ async def sector_stocks(index_name: str):
 
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/indices")
-async def all_indices():
-    try:
-        async with await _nse_session() as client:
-            r = await client.get("https://www.nseindia.com/api/allIndices", headers=NSE_HEADERS)
-            r.raise_for_status()
-            return r.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
