@@ -1,32 +1,21 @@
-"""Kotak Neo REST authentication using httpx — no SDK dependency.
-
-Auth flow (two sequential POST requests):
-  Step 1 — totp/login   : mobile + ucc + totp  → view_token + sid
-  Step 2 — totp/validate: mpin                 → trade_token + sid
-
-The authenticated session is cached for the calendar day and refreshed
-automatically on the next request after midnight.
-"""
+"""Kotak Neo auth using the official v2 SDK."""
 import asyncio
 import pyotp
-import httpx
 from datetime import date
 from typing import Optional
 
-from app.core.config import settings
+from neo_api_client import NeoAPI
 
-BASE_URL = "https://gw-napi.kotaksecurities.com"
-NEO_FIN_KEY = "neotradeapi"
+from app.core.config import settings
 
 
 class KotakSession:
-    __slots__ = ("trade_token", "sid", "rid", "hs_server_id")
+    __slots__ = ("client", "sid", "trade_token")
 
-    def __init__(self, trade_token: str, sid: str, rid: str, hs_server_id: str):
-        self.trade_token = trade_token
+    def __init__(self, client: NeoAPI, sid: str, trade_token: str):
+        self.client = client
         self.sid = sid
-        self.rid = rid
-        self.hs_server_id = hs_server_id
+        self.trade_token = trade_token
 
 
 class KotakNeoAuth:
@@ -39,62 +28,36 @@ class KotakNeoAuth:
         return pyotp.TOTP(settings.kotak_neo_totp_secret).now()
 
     async def _authenticate(self) -> KotakSession:
-        async with httpx.AsyncClient(timeout=15) as client:
-            # ─ Step 1: TOTP login ───────────────────────────────────────────
-            r1 = await client.post(
-                f"{BASE_URL}/login/1.0/login/v6/totp/login",
-                headers={
-                    "Authorization": settings.kotak_neo_consumer_key,
-                    "neo-fin-key": NEO_FIN_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "mobileNumber": settings.kotak_neo_mobile_number,
-                    "ucc": settings.kotak_neo_ucc,
-                    "totp": self._make_totp(),
-                },
-            )
-            r1.raise_for_status()
-            d1 = r1.json()
-
-            try:
-                view_token = d1["data"]["token"]
-                sid = d1["data"]["sid"]
-            except (KeyError, TypeError) as e:
-                raise RuntimeError(f"totp/login unexpected response: {d1}") from e
-
-            # ─ Step 2: TOTP validate ──────────────────────────────────────
-            r2 = await client.post(
-                f"{BASE_URL}/login/1.0/login/v6/totp/validate",
-                headers={
-                    "Authorization": settings.kotak_neo_consumer_key,
-                    "sid": sid,
-                    "Auth": view_token,
-                    "neo-fin-key": NEO_FIN_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={"mpin": settings.kotak_neo_mpin},
-            )
-            r2.raise_for_status()
-            d2 = r2.json()
-
-            try:
-                trade_token = d2["data"]["token"]
-                sid2 = d2["data"]["sid"]
-                rid = d2["data"].get("rid", "")
-                hs_server_id = d2["data"].get("hsServerId", "")
-            except (KeyError, TypeError) as e:
-                raise RuntimeError(f"totp/validate unexpected response: {d2}") from e
-
-        return KotakSession(
-            trade_token=trade_token,
-            sid=sid2,
-            rid=rid,
-            hs_server_id=hs_server_id,
+        client = NeoAPI(
+            environment="prod",
+            access_token=None,
+            neo_fin_key=None,
+            consumer_key=settings.kotak_neo_consumer_key,
         )
 
+        # Step 1: totp_login — returns view token + sid
+        r1 = await asyncio.to_thread(
+            client.totp_login,
+            mobile_number=settings.kotak_neo_mobile_number,
+            ucc=settings.kotak_neo_ucc,
+            totp=self._make_totp(),
+        )
+        if not r1 or r1.get("data") is None:
+            raise RuntimeError(f"totp_login failed: {r1}")
+
+        # Step 2: totp_validate — returns trade token
+        r2 = await asyncio.to_thread(
+            client.totp_validate,
+            mpin=settings.kotak_neo_mpin,
+        )
+        if not r2 or r2.get("data") is None:
+            raise RuntimeError(f"totp_validate failed: {r2}")
+
+        sid = r2["data"].get("sid", "")
+        trade_token = r2["data"].get("token", "")
+        return KotakSession(client=client, sid=sid, trade_token=trade_token)
+
     async def get_session(self) -> KotakSession:
-        """Return a valid session, re-authenticating once per calendar day."""
         async with self._lock:
             today = date.today()
             if self._session is None or self._auth_date != today:
