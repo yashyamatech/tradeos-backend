@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
-from app.api.routes import auth, market, trades
+from app.api.routes import auth, market, trades, nse
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
+app.include_router(nse.router, prefix="/api/nse", tags=["nse"])
 
 
 @app.get("/health")
