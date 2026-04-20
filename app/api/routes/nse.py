@@ -1,5 +1,6 @@
 import httpx
 from fastapi import APIRouter, HTTPException
+from urllib.parse import quote
 
 router = APIRouter()
 
@@ -20,13 +21,17 @@ SECTORS = {
 }
 
 
+async def _nse_session() -> httpx.AsyncClient:
+    """Return an httpx client with a live NSE session cookie."""
+    client = httpx.AsyncClient(timeout=20, follow_redirects=True)
+    await client.get("https://www.nseindia.com", headers=NSE_HEADERS)
+    return client
+
+
 @router.get("/heatmap")
 async def sector_heatmap():
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            # Establish NSE session (required for cookie)
-            await client.get("https://www.nseindia.com", headers=NSE_HEADERS)
-
+        async with await _nse_session() as client:
             r = await client.get(
                 "https://www.nseindia.com/api/allIndices",
                 headers=NSE_HEADERS,
@@ -52,21 +57,63 @@ async def sector_heatmap():
             for idx in data.get("data", [])
             if idx.get("index") in SECTORS
         ]
-
         return {"sectors": sectors, "timestamp": data.get("timestamp")}
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"NSE error: {e.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sector/{index_name}")
+async def sector_stocks(index_name: str):
+    """
+    Returns all constituent stocks for the given index with
+    open, high, low, previousClose, ltp, volume, change, pctChange.
+    e.g. /api/nse/sector/NIFTY%20BANK
+    """
+    try:
+        url = f"https://www.nseindia.com/api/equity-stockIndices?index={quote(index_name.upper())}"
+        async with await _nse_session() as client:
+            r = await client.get(url, headers=NSE_HEADERS)
+            r.raise_for_status()
+            data = r.json()
+
+        raw = data.get("data", [])
+        # First item is always the index summary itself — skip it
+        stocks = [
+            {
+                "symbol":        s.get("symbol"),
+                "open":          s.get("open"),
+                "high":          s.get("dayHigh"),
+                "low":           s.get("dayLow"),
+                "previousClose": s.get("previousClose"),
+                "ltp":           s.get("lastPrice"),
+                "volume":        s.get("totalTradedVolume"),
+                "change":        s.get("change"),
+                "pctChange":     s.get("pChange"),
+                "yearHigh":      s.get("52WH"),
+                "yearLow":       s.get("52WL"),
+            }
+            for s in raw[1:]  # skip index row
+        ]
+        return {
+            "index": index_name.upper(),
+            "stocks": stocks,
+            "timestamp": data.get("timestamp"),
+            "count": len(stocks),
+        }
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/indices")
 async def all_indices():
-    """Returns all NSE indices — useful for debugging raw response."""
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            await client.get("https://www.nseindia.com", headers=NSE_HEADERS)
+        async with await _nse_session() as client:
             r = await client.get("https://www.nseindia.com/api/allIndices", headers=NSE_HEADERS)
             r.raise_for_status()
             return r.json()
