@@ -35,7 +35,8 @@ app.add_middleware(
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    if request.url.path == "/health":
+    # Allow health check and CORS preflight through without API key
+    if request.url.path == "/health" or request.method == "OPTIONS":
         return await call_next(request)
     expected = settings.backend_api_key
     if expected:
