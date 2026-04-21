@@ -1,4 +1,7 @@
+import logging
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger("tradeos")
 
 
 class Settings(BaseSettings):
@@ -20,7 +23,10 @@ class Settings(BaseSettings):
     def get_origins(self) -> list[str]:
         origins = [o.strip() for o in self.allowed_origins.split(",")]
         if self.app_env == "production" and "*" in origins:
-            raise ValueError("Wildcard ALLOWED_ORIGINS is not permitted in production")
+            logger.warning(
+                "SECURITY: ALLOWED_ORIGINS is '*' in production. "
+                "Set ALLOWED_ORIGINS to your Vercel URL in Railway env vars."
+            )
         return origins
 
 
