@@ -23,7 +23,6 @@ STOCKS_BASE = "https://www.nseindia.com/api/heatmap-symbols"
 
 
 def _num(val) -> float:
-    """Parse NSE numeric values that may arrive as strings with commas."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
@@ -34,27 +33,26 @@ def _num(val) -> float:
         return 0.0
 
 
-async def _nse_get(url: str) -> dict:
-    """Establish NSE session cookie then fetch url in a single client lifecycle."""
+async def _nse_get(url: str):
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         await client.get("https://www.nseindia.com", headers=NSE_HEADERS)
         r = await client.get(url, headers=NSE_HEADERS)
         r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list):
-            logger.info("NSE %s -> list[%d], first keys: %s", url.split('?')[1], len(data),
-                        list(data[0].keys())[:8] if data and isinstance(data[0], dict) else "empty")
-        else:
-            logger.info("NSE %s -> dict keys: %s", url.split('?')[1], list(data.keys())[:8] if isinstance(data, dict) else type(data))
-        return data
+        return r.json()
 
 
 def _parse_index(idx: dict) -> dict:
+    # NSE heatmap-index uses: index, current, close, pChange, open, high, low
+    current = _num(idx.get("current") or idx.get("last") or idx.get("lastPrice") or idx.get("indexValue"))
+    prev_close = _num(idx.get("close") or idx.get("previousClose"))
+    change = _num(idx.get("variation") or idx.get("change") or idx.get("netChange"))
+    if change == 0.0 and current != 0.0 and prev_close != 0.0:
+        change = round(current - prev_close, 2)
     return {
-        "name":      (idx.get("indexSymbol") or idx.get("index") or idx.get("name") or ""),
-        "last":      _num(idx.get("last") or idx.get("lastPrice") or idx.get("indexValue") or idx.get("currentValue")),
-        "change":    _num(idx.get("variation") or idx.get("change") or idx.get("netChange")),
-        "pctChange": _num(idx.get("percentChange") or idx.get("pChange") or idx.get("perChange")),
+        "name":      idx.get("index") or idx.get("indexSymbol") or idx.get("name") or "",
+        "last":      current,
+        "change":    change,
+        "pctChange": _num(idx.get("pChange") or idx.get("percentChange") or idx.get("perChange")),
         "open":      _num(idx.get("open")),
         "high":      _num(idx.get("high")),
         "low":       _num(idx.get("low")),
@@ -70,9 +68,8 @@ async def sector_heatmap(type: str = Query(default="sectoral", description="sect
     try:
         data = await _nse_get(url)
         raw = data if isinstance(data, list) else data.get("data", [])
-        sectors = [_parse_index(i) for i in raw if i.get("indexSymbol") or i.get("index") or i.get("name")]
-        logger.info("Heatmap %s: %d sectors parsed", type, len(sectors))
-        return {"sectors": sectors, "count": len(sectors), "source": url}
+        sectors = [_parse_index(i) for i in raw if i.get("index") or i.get("indexSymbol") or i.get("name")]
+        return {"sectors": sectors, "count": len(sectors)}
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"NSE returned {e.response.status_code}")
     except Exception as e:
@@ -114,7 +111,7 @@ async def sector_stocks(
             for s in raw
             if s.get("symbol")
         ]
-        return {"index": index_name.upper(), "stocks": stocks, "count": len(stocks), "source": url}
+        return {"index": index_name.upper(), "stocks": stocks, "count": len(stocks)}
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
     except Exception as e:
