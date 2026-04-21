@@ -1,9 +1,17 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import logging
 from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.api.routes import auth, market, trades, nse
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("tradeos")
 
 
 @asynccontextmanager
@@ -20,9 +28,27 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
+
+
+@app.middleware("http")
+async def api_key_guard(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+    expected = settings.backend_api_key
+    if expected:
+        provided = request.headers.get("X-API-Key", "")
+        if provided != expected:
+            ip = request.client.host if request.client else "unknown"
+            logger.warning("Forbidden: bad API key from %s -> %s", ip, request.url.path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Forbidden"},
+            )
+    return await call_next(request)
+
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])

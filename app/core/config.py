@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_env: str = "development"
     allowed_origins: str = "*"
+    backend_api_key: str = ""
 
     # Kotak Neo
     kotak_neo_consumer_key: str = ""
@@ -17,7 +18,10 @@ class Settings(BaseSettings):
         case_sensitive = False
 
     def get_origins(self) -> list[str]:
-        return [o.strip() for o in self.allowed_origins.split(",")]
+        origins = [o.strip() for o in self.allowed_origins.split(",")]
+        if self.app_env == "production" and "*" in origins:
+            raise ValueError("Wildcard ALLOWED_ORIGINS is not permitted in production")
+        return origins
 
 
 settings = Settings()
