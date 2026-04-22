@@ -42,7 +42,6 @@ async def _nse_get(url: str):
 
 
 def _parse_index(idx: dict) -> dict:
-    # NSE heatmap-index uses: index, current, close, pChange, open, high, low
     current = _num(idx.get("current") or idx.get("last") or idx.get("lastPrice") or idx.get("indexValue"))
     prev_close = _num(idx.get("close") or idx.get("previousClose"))
     change = _num(idx.get("variation") or idx.get("change") or idx.get("netChange"))
@@ -61,6 +60,8 @@ def _parse_index(idx: dict) -> dict:
         "unchanged": int(idx.get("unchanged") or 0),
     }
 
+
+# ── Heatmap ────────────────────────────────────────────────────────────────
 
 @router.get("/heatmap")
 async def sector_heatmap(type: str = Query(default="sectoral", description="sectoral | broad")):
@@ -84,6 +85,8 @@ async def heatmap_raw(type: str = Query(default="sectoral")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Sector stocks ──────────────────────────────────────────────────────────
 
 @router.get("/sector/{index_name}")
 async def sector_stocks(
@@ -127,6 +130,57 @@ async def sector_stocks_raw(index_name: str, type: str = Query(default="sectoral
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Scrip search & quote ───────────────────────────────────────────────────
+
+@router.get("/search")
+async def search_scrip(q: str = Query(..., min_length=1)):
+    """NSE autocomplete — returns up to 20 matching symbols."""
+    url = f"https://www.nseindia.com/api/search/autocomplete?q={quote(q)}"
+    try:
+        raw = await _nse_get(url)
+        symbols = raw.get("symbols", [])
+        results = [
+            {
+                "symbol": s.get("symbol") or s.get("nsecode"),
+                "name":   s.get("company") or s.get("companyName") or "",
+                "series": s.get("series", "EQ"),
+            }
+            for s in symbols
+            if s.get("symbol") or s.get("nsecode")
+        ]
+        return {"results": results[:20]}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/quote")
+async def equity_quote(symbol: str = Query(...)):
+    """Live LTP + pctChange for an NSE equity symbol."""
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={quote(symbol.upper())}"
+    try:
+        raw = await _nse_get(url)
+        price = raw.get("priceInfo", {})
+        intra = price.get("intraDayHighLow", {})
+        return {
+            "symbol":    symbol.upper(),
+            "lastPrice": _num(price.get("lastPrice")),
+            "pctChange": _num(price.get("pChange")),
+            "change":    _num(price.get("change")),
+            "open":      _num(price.get("open")),
+            "high":      _num(intra.get("max") or price.get("high")),
+            "low":       _num(intra.get("min") or price.get("low")),
+            "close":     _num(price.get("previousClose")),
+        }
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"NSE {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Option chain ───────────────────────────────────────────────────────────
 
 @router.get("/option-chain")
 async def option_chain(
