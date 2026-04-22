@@ -126,3 +126,46 @@ async def sector_stocks_raw(index_name: str, type: str = Query(default="sectoral
         return {"url": url, "data": await _nse_get(url)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/option-chain")
+async def option_chain(
+    symbol: str = Query(..., description="NIFTY, BANKNIFTY, FINNIFTY, HDFCBANK, etc."),
+    type: str = Query(default="index", description="index | equity"),
+):
+    """Proxy NSE option chain. Returns expiry dates, spot value, and per-strike CE/PE data."""
+    endpoint = "option-chain-indices" if type.lower() == "index" else "option-chain-equities"
+    url = f"https://www.nseindia.com/api/{endpoint}?symbol={quote(symbol.upper())}"
+    try:
+        raw = await _nse_get(url)
+        records = raw.get("records", {})
+        data = records.get("data", [])
+        parsed = []
+        for row in data:
+            item: dict = {
+                "strikePrice": row.get("strikePrice"),
+                "expiryDate":  row.get("expiryDate"),
+            }
+            for ot in ("CE", "PE"):
+                if ot in row:
+                    o = row[ot]
+                    item[ot] = {
+                        "lastPrice": _num(o.get("lastPrice")),
+                        "change":    _num(o.get("change")),
+                        "pChange":   _num(o.get("pChange")),
+                        "oi":        int(o.get("openInterest") or 0),
+                        "volume":    int(o.get("totalTradedVolume") or 0),
+                        "iv":        _num(o.get("impliedVolatility")),
+                    }
+            parsed.append(item)
+        return {
+            "symbol":          symbol.upper(),
+            "underlyingValue": _num(records.get("underlyingValue")),
+            "expiryDates":     records.get("expiryDates", []),
+            "timestamp":       records.get("timestamp"),
+            "data":            parsed,
+        }
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"NSE returned {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
