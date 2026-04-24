@@ -32,8 +32,15 @@ class Settings(BaseSettings):
 
     @property
     def async_db_url(self) -> str:
-        """Convert Railway postgresql:// to asyncpg-compatible postgresql+asyncpg://."""
-        return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        """Convert Railway DATABASE_URL to asyncpg-compatible URL.
+        Railway may provide either postgres:// or postgresql://.
+        """
+        url = self.database_url
+        # Normalise postgres:// -> postgresql://
+        if url.startswith("postgres://"):
+            url = "postgresql" + url[len("postgres"):]
+        # Inject asyncpg driver
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 settings = Settings()

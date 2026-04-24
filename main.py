@@ -16,15 +16,23 @@ logger = logging.getLogger("tradeos")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create DB tables (no-op if DATABASE_URL not set)
+    # Create DB tables
     if settings.database_url:
-        from app.db.database import get_engine
-        from app.models.trade import Base
-        engine = get_engine()
-        if engine:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables ready")
+        logger.info("DATABASE_URL detected, initialising tables...")
+        try:
+            from app.db.database import get_engine
+            from app.models.trade import Base
+            engine = get_engine()
+            if engine:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                logger.info("Database tables ready (create_all complete)")
+            else:
+                logger.error("Engine is None — check DATABASE_URL format")
+        except Exception as exc:
+            logger.error("Failed to create DB tables: %s", exc, exc_info=True)
+    else:
+        logger.warning("DATABASE_URL not set — database features disabled")
 
     # Init Kotak Neo client
     from app.services.kotak_service import kotak_service
@@ -69,4 +77,5 @@ app.include_router(nse.router,    prefix="/api/nse",    tags=["nse"])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    db_ok = bool(settings.database_url)
+    return {"status": "ok", "db_configured": db_ok}
