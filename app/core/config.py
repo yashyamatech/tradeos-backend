@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     allowed_origins: str = "*"
     backend_api_key: str = ""
+    database_url: str = ""
 
     # Kotak Neo
     kotak_neo_consumer_key: str = ""
@@ -28,6 +29,11 @@ class Settings(BaseSettings):
                 "Set ALLOWED_ORIGINS to your Vercel URL in Railway env vars."
             )
         return origins
+
+    @property
+    def async_db_url(self) -> str:
+        """Convert Railway postgresql:// to asyncpg-compatible postgresql+asyncpg://."""
+        return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 settings = Settings()

@@ -16,6 +16,17 @@ logger = logging.getLogger("tradeos")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create DB tables (no-op if DATABASE_URL not set)
+    if settings.database_url:
+        from app.db.database import get_engine
+        from app.models.trade import Base
+        engine = get_engine()
+        if engine:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables ready")
+
+    # Init Kotak Neo client
     from app.services.kotak_service import kotak_service
     await kotak_service.init()
     yield
@@ -35,7 +46,6 @@ app.add_middleware(
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    # Allow health check and CORS preflight through without API key
     if request.url.path == "/health" or request.method == "OPTIONS":
         return await call_next(request)
     expected = settings.backend_api_key
@@ -51,10 +61,10 @@ async def api_key_guard(request: Request, call_next):
     return await call_next(request)
 
 
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(auth.router,   prefix="/api/auth",   tags=["auth"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
-app.include_router(nse.router, prefix="/api/nse", tags=["nse"])
+app.include_router(nse.router,    prefix="/api/nse",    tags=["nse"])
 
 
 @app.get("/health")
