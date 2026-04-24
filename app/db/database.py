@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -14,20 +15,51 @@ _engine: AsyncEngine | None = None
 _AsyncSessionLocal: async_sessionmaker | None = None
 
 
+def _build_url(raw: str) -> tuple[str, dict]:
+    """Return (asyncpg URL, connect_args).
+    Strips ?sslmode= from the URL and converts it to asyncpg connect_args.
+    """
+    url = raw
+    # Normalise postgres:// -> postgresql://
+    if url.startswith("postgres://"):
+        url = "postgresql" + url[len("postgres"):]
+    # Inject asyncpg driver
+    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    # Extract sslmode from query string (asyncpg uses connect_args instead)
+    ssl = False
+    if "sslmode=" in url:
+        if "sslmode=require" in url or "sslmode=verify" in url:
+            ssl = True
+        url = re.sub(r"[?&]sslmode=[^&]*", "", url).rstrip("?&")
+
+    connect_args: dict = {}
+    if ssl:
+        connect_args["ssl"] = "require"
+
+    return url, connect_args
+
+
 def init_engine() -> None:
     global _engine, _AsyncSessionLocal
     if not settings.database_url:
         logger.warning("DATABASE_URL not set — database features disabled")
         return
-    _engine = create_async_engine(
-        settings.async_db_url,
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
-        echo=False,
-    )
-    _AsyncSessionLocal = async_sessionmaker(_engine, expire_on_commit=False)
-    logger.info("Async database engine initialised")
+    try:
+        url, connect_args = _build_url(settings.database_url)
+        logger.info("Connecting to DB (ssl=%s)", connect_args.get("ssl", False))
+        _engine = create_async_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            echo=False,
+            connect_args=connect_args,
+        )
+        _AsyncSessionLocal = async_sessionmaker(_engine, expire_on_commit=False)
+        logger.info("Async database engine initialised")
+    except Exception as exc:
+        logger.error("Failed to create DB engine: %s", exc, exc_info=True)
 
 
 def get_engine() -> AsyncEngine | None:
@@ -41,5 +73,4 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-# Initialise on import so the engine is ready before lifespan runs
 init_engine()

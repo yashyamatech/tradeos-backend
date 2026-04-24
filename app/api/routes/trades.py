@@ -1,4 +1,5 @@
 import uuid
+import logging
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -11,11 +12,12 @@ from app.db.database import get_db
 from app.models.trade import Trade, TradeDirection, TradeStatus
 
 router = APIRouter()
+logger = logging.getLogger("tradeos.trades")
 
 
 class TradeIn(BaseModel):
     symbol:      str
-    direction:   str            # BUY | SELL
+    direction:   str
     quantity:    int = 1
     entry_price: float
     stop_loss:   float = 0
@@ -59,42 +61,53 @@ def _out(t: Trade) -> TradeOut:
     )
 
 
+@router.get("/", response_model=list[TradeOut])
+async def list_trades(
+    status: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        stmt = select(Trade).order_by(Trade.created_at.desc())
+        if status:
+            try:
+                stmt = stmt.where(Trade.status == TradeStatus(status))
+            except ValueError:
+                raise HTTPException(400, f"Invalid status '{status}'")
+        result = await db.execute(stmt)
+        return [_out(t) for t in result.scalars().all()]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("list_trades error: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Database error: {exc}")
+
+
 @router.post("/", response_model=TradeOut, status_code=201)
 async def create_trade(body: TradeIn, db: AsyncSession = Depends(get_db)):
     try:
         direction = TradeDirection(body.direction.upper())
     except ValueError:
-        raise HTTPException(status_code=400, detail="direction must be BUY or SELL")
-    trade = Trade(
-        id=str(uuid.uuid4()),
-        symbol=body.symbol.upper(),
-        direction=direction,
-        quantity=body.quantity,
-        entry_price=body.entry_price,
-        stop_loss=body.stop_loss,
-        target=body.target,
-        notes=body.notes,
-        status=TradeStatus.OPEN,
-    )
-    db.add(trade)
-    await db.commit()
-    await db.refresh(trade)
-    return _out(trade)
-
-
-@router.get("/", response_model=list[TradeOut])
-async def list_trades(
-    status: Optional[str] = Query(None, description="open | closed"),
-    db: AsyncSession = Depends(get_db),
-):
-    stmt = select(Trade).order_by(Trade.created_at.desc())
-    if status:
-        try:
-            stmt = stmt.where(Trade.status == TradeStatus(status))
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
-    result = await db.execute(stmt)
-    return [_out(t) for t in result.scalars().all()]
+        raise HTTPException(400, "direction must be BUY or SELL")
+    try:
+        trade = Trade(
+            id=str(uuid.uuid4()),
+            symbol=body.symbol.upper(),
+            direction=direction,
+            quantity=body.quantity,
+            entry_price=body.entry_price,
+            stop_loss=body.stop_loss,
+            target=body.target,
+            notes=body.notes,
+            status=TradeStatus.OPEN,
+        )
+        db.add(trade)
+        await db.commit()
+        await db.refresh(trade)
+        return _out(trade)
+    except Exception as exc:
+        await db.rollback()
+        logger.error("create_trade error: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Database error: {exc}")
 
 
 @router.post("/{trade_id}/close", response_model=TradeOut)
@@ -103,29 +116,42 @@ async def close_trade(
     exit_price: float = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    trade = await db.get(Trade, trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    if trade.status == TradeStatus.CLOSED:
-        raise HTTPException(status_code=400, detail="Trade already closed")
-    trade.exit_price = exit_price
-    trade.status = TradeStatus.CLOSED
-    trade.closed_at = datetime.now(timezone.utc)
-    # P&L: positive for BUY if price rose, for SELL if price fell
-    if trade.direction == TradeDirection.BUY:
-        trade.pnl = round((exit_price - trade.entry_price) * trade.quantity, 2)
-    else:
-        trade.pnl = round((trade.entry_price - exit_price) * trade.quantity, 2)
-    await db.commit()
-    await db.refresh(trade)
-    return _out(trade)
+    try:
+        trade = await db.get(Trade, trade_id)
+        if not trade:
+            raise HTTPException(404, "Trade not found")
+        if trade.status == TradeStatus.CLOSED:
+            raise HTTPException(400, "Trade already closed")
+        trade.exit_price = exit_price
+        trade.status = TradeStatus.CLOSED
+        trade.closed_at = datetime.now(timezone.utc)
+        if trade.direction == TradeDirection.BUY:
+            trade.pnl = round((exit_price - trade.entry_price) * trade.quantity, 2)
+        else:
+            trade.pnl = round((trade.entry_price - exit_price) * trade.quantity, 2)
+        await db.commit()
+        await db.refresh(trade)
+        return _out(trade)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error("close_trade error: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Database error: {exc}")
 
 
 @router.delete("/{trade_id}")
 async def delete_trade(trade_id: str, db: AsyncSession = Depends(get_db)):
-    trade = await db.get(Trade, trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    await db.delete(trade)
-    await db.commit()
-    return {"ok": True}
+    try:
+        trade = await db.get(Trade, trade_id)
+        if not trade:
+            raise HTTPException(404, "Trade not found")
+        await db.delete(trade)
+        await db.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error("delete_trade error: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Database error: {exc}")
