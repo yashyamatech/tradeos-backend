@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.core.config import settings
 from app.api.routes import auth, market, trades, nse
@@ -13,10 +14,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tradeos")
 
+# Bump this when the trades schema changes to force a table rebuild on next deploy.
+_SCHEMA_VERSION = 2
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create DB tables
     if settings.database_url:
         logger.info("DATABASE_URL detected, initialising tables...")
         try:
@@ -25,16 +28,45 @@ async def lifespan(app: FastAPI):
             engine = get_engine()
             if engine:
                 async with engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
-                logger.info("Database tables ready (create_all complete)")
+                    # Check whether the current schema is up to date.
+                    # If the schema_version table doesn't exist, or the version
+                    # is older than _SCHEMA_VERSION, drop and recreate all tables.
+                    try:
+                        row = await conn.execute(
+                            text("SELECT version FROM schema_version WHERE table_name = 'trades'")
+                        )
+                        db_version = row.scalar()
+                    except Exception:
+                        db_version = None
+
+                    if db_version != _SCHEMA_VERSION:
+                        logger.warning(
+                            "Schema version mismatch (db=%s, expected=%s) — rebuilding trades table",
+                            db_version, _SCHEMA_VERSION,
+                        )
+                        await conn.execute(text("DROP TABLE IF EXISTS trades"))
+                        await conn.execute(text("DROP TABLE IF EXISTS schema_version"))
+                        await conn.run_sync(Base.metadata.create_all)
+                        await conn.execute(text(
+                            "CREATE TABLE IF NOT EXISTS schema_version "
+                            "(table_name TEXT PRIMARY KEY, version INTEGER)"
+                        ))
+                        await conn.execute(text(
+                            f"INSERT INTO schema_version (table_name, version) "
+                            f"VALUES ('trades', {_SCHEMA_VERSION}) "
+                            f"ON CONFLICT (table_name) DO UPDATE SET version = EXCLUDED.version"
+                        ))
+                        logger.info("Trades table rebuilt at schema version %s", _SCHEMA_VERSION)
+                    else:
+                        await conn.run_sync(Base.metadata.create_all)
+                        logger.info("Database tables ready (schema v%s)", _SCHEMA_VERSION)
             else:
                 logger.error("Engine is None — check DATABASE_URL format")
         except Exception as exc:
-            logger.error("Failed to create DB tables: %s", exc, exc_info=True)
+            logger.error("Failed to initialise DB tables: %s", exc, exc_info=True)
     else:
         logger.warning("DATABASE_URL not set — database features disabled")
 
-    # Init Kotak Neo client
     from app.services.kotak_service import kotak_service
     await kotak_service.init()
     yield
@@ -77,5 +109,4 @@ app.include_router(nse.router,    prefix="/api/nse",    tags=["nse"])
 
 @app.get("/health")
 async def health():
-    db_ok = bool(settings.database_url)
-    return {"status": "ok", "db_configured": db_ok}
+    return {"status": "ok", "db_configured": bool(settings.database_url)}
