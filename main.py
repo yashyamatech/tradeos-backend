@@ -14,8 +14,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tradeos")
 
-# Bump this when the trades schema changes to force a table rebuild on next deploy.
-_SCHEMA_VERSION = 2
+
+async def _ensure_db_schema(engine) -> None:
+    """Drop and recreate the trades table if the schema is outdated."""
+    from app.models.trade import Base
+
+    async with engine.begin() as conn:
+        # information_schema.columns never throws — safe to query unconditionally
+        result = await conn.execute(text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_name = 'trades' AND column_name = 'direction'"
+        ))
+        has_direction = (result.scalar() or 0) > 0
+
+        if not has_direction:
+            logger.warning("Trades table missing 'direction' column — rebuilding")
+            # Drop the table and its dependent enum types so create_all starts clean
+            await conn.execute(text("DROP TABLE IF EXISTS trades CASCADE"))
+            await conn.execute(text("DROP TYPE IF EXISTS tradedirection CASCADE"))
+            await conn.execute(text("DROP TYPE IF EXISTS tradestatus CASCADE"))
+            logger.info("Stale trades table and enums dropped")
+
+        await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables ready")
 
 
 @asynccontextmanager
@@ -24,44 +45,11 @@ async def lifespan(app: FastAPI):
         logger.info("DATABASE_URL detected, initialising tables...")
         try:
             from app.db.database import get_engine
-            from app.models.trade import Base
             engine = get_engine()
             if engine:
-                async with engine.begin() as conn:
-                    # Check whether the current schema is up to date.
-                    # If the schema_version table doesn't exist, or the version
-                    # is older than _SCHEMA_VERSION, drop and recreate all tables.
-                    try:
-                        row = await conn.execute(
-                            text("SELECT version FROM schema_version WHERE table_name = 'trades'")
-                        )
-                        db_version = row.scalar()
-                    except Exception:
-                        db_version = None
-
-                    if db_version != _SCHEMA_VERSION:
-                        logger.warning(
-                            "Schema version mismatch (db=%s, expected=%s) — rebuilding trades table",
-                            db_version, _SCHEMA_VERSION,
-                        )
-                        await conn.execute(text("DROP TABLE IF EXISTS trades"))
-                        await conn.execute(text("DROP TABLE IF EXISTS schema_version"))
-                        await conn.run_sync(Base.metadata.create_all)
-                        await conn.execute(text(
-                            "CREATE TABLE IF NOT EXISTS schema_version "
-                            "(table_name TEXT PRIMARY KEY, version INTEGER)"
-                        ))
-                        await conn.execute(text(
-                            f"INSERT INTO schema_version (table_name, version) "
-                            f"VALUES ('trades', {_SCHEMA_VERSION}) "
-                            f"ON CONFLICT (table_name) DO UPDATE SET version = EXCLUDED.version"
-                        ))
-                        logger.info("Trades table rebuilt at schema version %s", _SCHEMA_VERSION)
-                    else:
-                        await conn.run_sync(Base.metadata.create_all)
-                        logger.info("Database tables ready (schema v%s)", _SCHEMA_VERSION)
+                await _ensure_db_schema(engine)
             else:
-                logger.error("Engine is None — check DATABASE_URL format")
+                logger.error("Engine is None — check DATABASE_URL and Railway logs")
         except Exception as exc:
             logger.error("Failed to initialise DB tables: %s", exc, exc_info=True)
     else:
