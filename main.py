@@ -16,25 +16,18 @@ logger = logging.getLogger("tradeos")
 
 
 async def _ensure_db_schema(engine) -> None:
-    """Drop and recreate the trades table if the schema is outdated."""
     from app.models.trade import Base
-
     async with engine.begin() as conn:
-        # information_schema.columns never throws — safe to query unconditionally
         result = await conn.execute(text(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_name = 'trades' AND column_name = 'direction'"
         ))
         has_direction = (result.scalar() or 0) > 0
-
         if not has_direction:
-            logger.warning("Trades table missing 'direction' column — rebuilding")
-            # Drop the table and its dependent enum types so create_all starts clean
+            logger.warning("Trades table has outdated schema — rebuilding")
             await conn.execute(text("DROP TABLE IF EXISTS trades CASCADE"))
             await conn.execute(text("DROP TYPE IF EXISTS tradedirection CASCADE"))
             await conn.execute(text("DROP TYPE IF EXISTS tradestatus CASCADE"))
-            logger.info("Stale trades table and enums dropped")
-
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables ready")
 
@@ -63,10 +56,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TradeOS API", version="0.1.0", lifespan=lifespan)
 
+# allow_credentials must be False when allow_origins contains "*".
+# We authenticate via X-API-Key header, not cookies, so credentials=False is correct.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_origins(),
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
