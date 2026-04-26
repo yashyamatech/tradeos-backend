@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     AsyncEngine,
 )
+from fastapi import HTTPException
 from app.core.config import settings
 
 logger = logging.getLogger("tradeos.db")
@@ -16,27 +17,30 @@ _AsyncSessionLocal: async_sessionmaker | None = None
 
 
 def _build_url(raw: str) -> tuple[str, dict]:
-    """Return (asyncpg URL, connect_args).
-    Strips ?sslmode= from the URL and converts it to asyncpg connect_args.
-    """
     url = raw
-    # Normalise postgres:// -> postgresql://
     if url.startswith("postgres://"):
         url = "postgresql" + url[len("postgres"):]
-    # Inject asyncpg driver
     url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    # Extract sslmode from query string (asyncpg uses connect_args instead)
-    ssl = False
+    # Parse explicit sslmode and strip it (asyncpg uses connect_args)
+    ssl: str | bool | None = None
     if "sslmode=" in url:
-        if "sslmode=require" in url or "sslmode=verify" in url:
-            ssl = True
+        if "sslmode=disable" in url:
+            ssl = False
+        elif "sslmode=require" in url or "sslmode=verify" in url:
+            ssl = "require"
         url = re.sub(r"[?&]sslmode=[^&]*", "", url).rstrip("?&")
+
+    # Default: require SSL for any non-local host (covers Railway, Supabase, etc.)
+    if ssl is None:
+        is_local = any(h in url for h in ["localhost", "127.0.0.1", "::1", "@db:", "@postgres:"])
+        ssl = False if is_local else "require"
 
     connect_args: dict = {}
     if ssl:
-        connect_args["ssl"] = "require"
+        connect_args["ssl"] = ssl
 
+    logger.info("DB URL built (ssl=%s, host masked)", ssl)
     return url, connect_args
 
 
@@ -47,7 +51,6 @@ def init_engine() -> None:
         return
     try:
         url, connect_args = _build_url(settings.database_url)
-        logger.info("Connecting to DB (ssl=%s)", connect_args.get("ssl", False))
         _engine = create_async_engine(
             url,
             pool_pre_ping=True,
@@ -68,9 +71,17 @@ def get_engine() -> AsyncEngine | None:
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     if _AsyncSessionLocal is None:
-        raise RuntimeError("Database not configured — set DATABASE_URL env var")
-    async with _AsyncSessionLocal() as session:
-        yield session
+        detail = (
+            "Database not configured — DATABASE_URL is missing or the engine failed to "
+            "initialise (check Railway logs for the startup error)."
+        )
+        raise HTTPException(status_code=500, detail=detail)
+    try:
+        async with _AsyncSessionLocal() as session:
+            yield session
+    except Exception as exc:
+        logger.error("DB session error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database session error: {exc}")
 
 
 init_engine()
