@@ -1,7 +1,7 @@
 import uuid
 import logging
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -99,6 +99,7 @@ async def create_trade(body: TradeIn, db: AsyncSession = Depends(get_db)):
             target=body.target,
             notes=body.notes,
             status=TradeStatus.OPEN,
+            created_at=datetime.utcnow(),
         )
         db.add(trade)
         await db.commit()
@@ -124,7 +125,7 @@ async def close_trade(
             raise HTTPException(400, "Trade already closed")
         trade.exit_price = exit_price
         trade.status = TradeStatus.CLOSED
-        trade.closed_at = datetime.now(timezone.utc)
+        trade.closed_at = datetime.utcnow()
         if trade.direction == TradeDirection.BUY:
             trade.pnl = round((exit_price - trade.entry_price) * trade.quantity, 2)
         else:
