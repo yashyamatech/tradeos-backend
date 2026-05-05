@@ -18,17 +18,30 @@ logger = logging.getLogger("tradeos")
 async def _ensure_db_schema(engine) -> None:
     from app.models.trade import Base
     async with engine.begin() as conn:
+        # Rebuild table if old F&O schema (missing 'direction' column)
         result = await conn.execute(text(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_name = 'trades' AND column_name = 'direction'"
         ))
-        has_direction = (result.scalar() or 0) > 0
-        if not has_direction:
+        if (result.scalar() or 0) == 0:
             logger.warning("Trades table has outdated schema — rebuilding")
             await conn.execute(text("DROP TABLE IF EXISTS trades CASCADE"))
             await conn.execute(text("DROP TYPE IF EXISTS tradedirection CASCADE"))
             await conn.execute(text("DROP TYPE IF EXISTS tradestatus CASCADE"))
+
         await conn.run_sync(Base.metadata.create_all)
+
+        # Non-destructive: add is_paper column if it doesn't exist yet
+        result = await conn.execute(text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_name = 'trades' AND column_name = 'is_paper'"
+        ))
+        if (result.scalar() or 0) == 0:
+            await conn.execute(text(
+                "ALTER TABLE trades ADD COLUMN is_paper BOOLEAN NOT NULL DEFAULT TRUE"
+            ))
+            logger.info("Added is_paper column to trades table")
+
         logger.info("Database tables ready")
 
 
@@ -56,8 +69,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TradeOS API", version="0.1.0", lifespan=lifespan)
 
-# allow_credentials must be False when allow_origins contains "*".
-# We authenticate via X-API-Key header, not cookies, so credentials=False is correct.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_origins(),

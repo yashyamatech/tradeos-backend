@@ -23,6 +23,7 @@ class TradeIn(BaseModel):
     stop_loss:   float = 0
     target:      float = 0
     notes:       Optional[str] = None
+    is_paper:    bool = True
 
 
 class TradeOut(BaseModel):
@@ -37,6 +38,7 @@ class TradeOut(BaseModel):
     pnl:         Optional[float] = None
     status:      str
     notes:       Optional[str] = None
+    is_paper:    bool = True
     created_at:  str
     closed_at:   Optional[str] = None
 
@@ -56,16 +58,14 @@ def _out(t: Trade) -> TradeOut:
         pnl=t.pnl,
         status=t.status.value if hasattr(t.status, "value") else str(t.status),
         notes=t.notes,
+        is_paper=t.is_paper if t.is_paper is not None else True,
         created_at=t.created_at.isoformat() if t.created_at else "",
         closed_at=t.closed_at.isoformat() if t.closed_at else None,
     )
 
 
 @router.get("/", response_model=list[TradeOut])
-async def list_trades(
-    status: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db),
-):
+async def list_trades(status: Optional[str] = Query(None), db: AsyncSession = Depends(get_db)):
     try:
         stmt = select(Trade).order_by(Trade.created_at.desc())
         if status:
@@ -98,6 +98,7 @@ async def create_trade(body: TradeIn, db: AsyncSession = Depends(get_db)):
             stop_loss=body.stop_loss,
             target=body.target,
             notes=body.notes,
+            is_paper=body.is_paper,
             status=TradeStatus.OPEN,
             created_at=datetime.utcnow(),
         )
@@ -112,11 +113,7 @@ async def create_trade(body: TradeIn, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{trade_id}/close", response_model=TradeOut)
-async def close_trade(
-    trade_id: str,
-    exit_price: float = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
+async def close_trade(trade_id: str, exit_price: float = Query(...), db: AsyncSession = Depends(get_db)):
     try:
         trade = await db.get(Trade, trade_id)
         if not trade:

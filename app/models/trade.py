@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Integer, DateTime, Enum
+from sqlalchemy import Column, String, Float, Integer, DateTime, Enum, Boolean
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
 import enum
@@ -19,7 +19,6 @@ class TradeStatus(str, enum.Enum):
 
 
 def _utcnow() -> datetime:
-    """Timezone-naive UTC now — asyncpg requires naive datetimes for TIMESTAMP columns."""
     return datetime.utcnow()
 
 
@@ -37,5 +36,6 @@ class Trade(Base):
     pnl         = Column(Float,   nullable=True)
     status      = Column(Enum(TradeStatus), default=TradeStatus.OPEN)
     notes       = Column(String,  nullable=True)
+    is_paper    = Column(Boolean,  nullable=False, default=True, server_default="true")
     created_at  = Column(DateTime, default=_utcnow)
     closed_at   = Column(DateTime, nullable=True)
