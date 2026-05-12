@@ -1,11 +1,7 @@
 from sqlalchemy import Column, String, Float, Integer, DateTime, Enum, Boolean
-from sqlalchemy.orm import DeclarativeBase
+from app.models.base import Base
 from datetime import datetime
 import enum
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class TradeDirection(str, enum.Enum):

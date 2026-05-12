@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.api.routes import auth, market, trades, nse
+from app.api.routes import auth, market, trades, nse, lots
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,9 +16,13 @@ logger = logging.getLogger("tradeos")
 
 
 async def _ensure_db_schema(engine) -> None:
-    from app.models.trade import Base
+    # Import all models so their tables register with Base.metadata
+    from app.models.base import Base
+    from app.models.trade import Trade        # noqa: F401
+    from app.models.lot import StockLot      # noqa: F401
+
     async with engine.begin() as conn:
-        # Rebuild table if old F&O schema (missing 'direction' column)
+        # Rebuild trades table if old F&O schema (missing 'direction' column)
         result = await conn.execute(text(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_name = 'trades' AND column_name = 'direction'"
@@ -29,6 +33,7 @@ async def _ensure_db_schema(engine) -> None:
             await conn.execute(text("DROP TYPE IF EXISTS tradedirection CASCADE"))
             await conn.execute(text("DROP TYPE IF EXISTS tradestatus CASCADE"))
 
+        # Create all tables (trades + stock_lots) — no-op for existing tables
         await conn.run_sync(Base.metadata.create_all)
 
         # Non-destructive: add is_paper column if it doesn't exist yet
@@ -73,7 +78,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
 
@@ -99,6 +104,7 @@ app.include_router(auth.router,   prefix="/api/auth",   tags=["auth"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
 app.include_router(nse.router,    prefix="/api/nse",    tags=["nse"])
+app.include_router(lots.router,   prefix="/api/lots",   tags=["lots"])
 
 
 @app.get("/health")
